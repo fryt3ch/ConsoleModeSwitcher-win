@@ -103,6 +103,25 @@ Register-ScheduledTask -TaskName ConsoleModeSwitcher -Action $action -Trigger $t
 
 Replace paths with the actual absolute paths to your script and PowerShell.
 
+## Extra
+
+### Disabling Steam Big Picture intro video
+
+1. Execute commands:
+
+```powershell
+$steamPath = "C:\Program Files (x86)\Steam"
+$blankIntroUrl = "https://github.com/fryt3ch/ConsoleModeSwitcher-win/releases/download/Extra/bigpicture_startup_blank.webm"
+
+$moviesPath = "$steamPath\config\uioverrides\movies"
+
+New-Item -ItemType Directory -Path $moviesPath -Force -ErrorAction SilentlyContinue
+
+Invoke-WebRequest -Uri $blankIntroUrl -OutFile "$moviesPath\bigpicture_startup.webm"
+```
+
+2. Restart Steam.
+
 ## License
 
 MIT
