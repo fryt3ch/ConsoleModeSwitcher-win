@@ -6,7 +6,17 @@ param(
     [string]$ControllerName = "Xbox 360 Controller for Windows",
     [int]$GracePeriodSeconds = 300,
     [int]$WinHoldSeconds = 2,
-    [switch]$AutoSwitch
+    [switch]$AutoSwitch,
+    [switch]$TVControl,
+    [string]$HAServer  = "http://homeassistant.local:8123",
+    [string]$HAToken,
+    [string]$TVEntity  = "media_player.tv",
+    [string]$TVSource,
+    [string]$TVHdmiUri,
+    [int]$TVStartupSeconds = 5,
+    [switch]$TVAutoOff,
+    [switch]$TVAutoHome,
+    [string]$TVRemoteEntity = "remote.tv"
 )
 
 $consoleModeConfig = Join-Path $ProfilesDir "$ConsoleMode.xml"
@@ -118,7 +128,70 @@ function Test-WinHeld {
     return ($keyState -band 0x8000) -ne 0
 }
 
+function Invoke-HAService($domain, $service, $entity, $extraData) {
+    $body = @{ entity_id = $entity }
+    if ($extraData) { $body += $extraData }
+    $uri = "$HAServer/api/services/$domain/$service"
+    $json = $body | ConvertTo-Json -Compress -Depth 3
+
+    try {
+        $null = Invoke-RestMethod -Uri $uri -Method Post `
+            -Headers @{ Authorization = "Bearer $HAToken" } `
+            -Body $json `
+            -ContentType "application/json"
+        return $true
+    }
+    catch {
+        if ($_.ErrorDetails.Message) {
+            Write-Host "    [!] " -ForegroundColor Red -NoNewline
+            Write-Host "$($_.ErrorDetails.Message)" -ForegroundColor Red
+        }
+        return $false
+    }
+}
+
 function Set-ConsoleMode {
+    if ($TVControl) {
+        Write-Host "  [*]" -ForegroundColor Cyan -NoNewline
+        Write-Host " Turning on TV..." -ForegroundColor White
+        Invoke-HAService "media_player" "turn_on" $TVEntity
+
+        Start-Sleep -Seconds $TVStartupSeconds
+
+        Write-Host "  [*]" -ForegroundColor Cyan -NoNewline
+        Write-Host " TV ready" -ForegroundColor Green
+
+        if ($TVSource) {
+            Write-Host "  [*]" -ForegroundColor Cyan -NoNewline
+            Write-Host " Switching TV input to $TVSource..." -ForegroundColor White
+            $ok = Invoke-HAService "media_player" "select_source" $TVEntity @{ source = $TVSource }
+            if (-not $ok -and $TVHdmiUri) {
+                Write-Host "  [*]" -ForegroundColor Cyan -NoNewline
+                Write-Host " select_source failed, trying play_media..." -ForegroundColor White
+                $ok = Invoke-HAService "media_player" "play_media" $TVEntity @{
+                    media_content_type = "app"
+                    media_content_id   = $TVHdmiUri
+                }
+            }
+            if (-not $ok) {
+                Write-Host "  [!] " -ForegroundColor Yellow -NoNewline
+                Write-Host "HDMI switch failed — switch manually" -ForegroundColor Yellow
+            }
+        }
+        elseif ($TVHdmiUri) {
+            Write-Host "  [*]" -ForegroundColor Cyan -NoNewline
+            Write-Host " Switching TV input via play_media..." -ForegroundColor White
+            $ok = Invoke-HAService "media_player" "play_media" $TVEntity @{
+                media_content_type = "app"
+                media_content_id   = $TVHdmiUri
+            }
+            if (-not $ok) {
+                Write-Host "  [!] " -ForegroundColor Yellow -NoNewline
+                Write-Host "HDMI switch failed — switch manually" -ForegroundColor Yellow
+            }
+        }
+    }
+
     Write-Host "  [*]" -ForegroundColor Cyan -NoNewline
     Write-Host " Loading profile: " -ForegroundColor White -NoNewline
     Write-Host $ConsoleMode -ForegroundColor Green
@@ -139,6 +212,24 @@ function Set-DesktopMode {
         Start-Process "steam://close/bigpicture"
     }
 
+    if ($TVControl) {
+        if ($TVAutoHome) {
+            Write-Host "  [*]" -ForegroundColor Cyan -NoNewline
+            Write-Host " Switching TV to home screen..." -ForegroundColor White
+            $ok = Invoke-HAService "remote" "send_command" $TVRemoteEntity @{ command = "HOME" }
+            if (-not $ok) {
+                Write-Host "  [!] " -ForegroundColor Yellow -NoNewline
+                Write-Host "send_command failed — skipping home screen" -ForegroundColor Yellow
+            }
+        }
+
+        if ($TVAutoOff) {
+            Write-Host "  [*]" -ForegroundColor Cyan -NoNewline
+            Write-Host " Turning off TV..." -ForegroundColor White
+            Invoke-HAService "media_player" "turn_off" $TVEntity
+        }
+    }
+
     Write-Host "  [*]" -ForegroundColor Cyan -NoNewline
     Write-Host " Loading profile: " -ForegroundColor White -NoNewline
     Write-Host "Desktop" -ForegroundColor Blue
@@ -150,6 +241,11 @@ function Set-DesktopMode {
 }
 
 # ──────────────────────────────────────────────
+if ($TVControl -and -not $HAToken) {
+    Write-Host "  [!]" -ForegroundColor Red -NoNewline
+    Write-Host " -TVControl requires -HAToken" -ForegroundColor Red
+    exit 1
+}
 Write-Host ""
 Write-Host "  ───  " -ForegroundColor DarkCyan -NoNewline
 Write-Host "Console Mode Switcher" -ForegroundColor Cyan -NoNewline
@@ -166,6 +262,16 @@ Write-Host "hold ${WinHoldSeconds}s" -ForegroundColor White
 $triggerMode = if ($AutoSwitch) { "Auto (on connect)" } else { "Guide button" }
 Write-Host "    Trigger: " -ForegroundColor DarkGray -NoNewline
 Write-Host $triggerMode -ForegroundColor White
+
+if ($TVControl) {
+    $tvInfo = "$TVEntity  |  Startup: ${TVStartupSeconds}s"
+    if ($TVSource) { $tvInfo += "  |  $TVSource" }
+    elseif ($TVHdmiUri) { $tvInfo += "  |  play_media" }
+    if ($TVAutoHome) { $tvInfo += "  |  home on exit ($TVRemoteEntity)" }
+    if ($TVAutoOff) { $tvInfo += "  |  off on exit" }
+    Write-Host "    TV Control: " -ForegroundColor DarkGray -NoNewline
+    Write-Host $tvInfo -ForegroundColor White
+}
 Write-Host ""
 
 # ─── State ────────────────────────────────────
@@ -177,7 +283,6 @@ $winLastShown        = -1
     $overrideDirection   = $null    # "desktop" or "console"
     $announcedController = $false
 
-Set-DesktopMode
 if (Test-ControllerConnected) {
     if ($AutoSwitch) {
         Set-ConsoleMode
