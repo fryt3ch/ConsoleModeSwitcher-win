@@ -5,7 +5,8 @@ param(
     [string]$Tool = ".\MonitorProfileSwitcher\MonitorSwitcher.exe",
     [string]$ControllerName = "Xbox 360 Controller for Windows",
     [int]$GracePeriodSeconds = 300,
-    [int]$WinHoldSeconds = 2
+    [int]$WinHoldSeconds = 2,
+    [switch]$AutoSwitch
 )
 
 $consoleModeConfig = Join-Path $ProfilesDir "$ConsoleMode.xml"
@@ -22,7 +23,72 @@ public class NativeMethods {
     [DllImport("user32.dll")]
     public static extern short GetAsyncKeyState(int vKey);
 }
-'@
+
+[StructLayout(LayoutKind.Sequential)]
+public struct XINPUT_GAMEPAD {
+    public ushort wButtons;
+    public byte bLeftTrigger;
+    public byte bRightTrigger;
+    public short sThumbLX;
+    public short sThumbLY;
+    public short sThumbRX;
+    public short sThumbRY;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public struct XINPUT_STATE {
+    public uint dwPacketNumber;
+    public XINPUT_GAMEPAD Gamepad;
+}
+
+public class XInput {
+    private delegate uint GetStateDelegate(uint dwUserIndex, ref XINPUT_STATE pState);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr LoadLibrary(string lpFileName);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr GetProcAddress(IntPtr hModule, string lpProcName);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr GetProcAddress(IntPtr hModule, IntPtr lpProcName);
+
+    private static GetStateDelegate _getStateFn = null;
+    private static bool _resolved = false;
+
+    private static void Resolve() {
+        if (_resolved) return;
+        _resolved = true;
+
+        string[] dlls = { "xinput1_4.dll", "xinput1_3.dll", "xinput9_1_0.dll" };
+
+        for (int i = 0; i < dlls.Length; i++) {
+            IntPtr hModule = LoadLibrary(dlls[i]);
+            if (hModule == IntPtr.Zero) continue;
+
+            IntPtr fn100 = GetProcAddress(hModule, (IntPtr)100);
+            if (fn100 != IntPtr.Zero) {
+                _getStateFn = (GetStateDelegate)Marshal.GetDelegateForFunctionPointer(
+                    fn100, typeof(GetStateDelegate));
+                return;
+            }
+
+            IntPtr fn = GetProcAddress(hModule, "XInputGetState");
+            if (fn != IntPtr.Zero) {
+                _getStateFn = (GetStateDelegate)Marshal.GetDelegateForFunctionPointer(
+                    fn, typeof(GetStateDelegate));
+                return;
+            }
+        }
+    }
+
+    public static uint GetState(uint dwUserIndex, ref XINPUT_STATE pState) {
+        if (!_resolved) Resolve();
+        if (_getStateFn != null) return _getStateFn(dwUserIndex, ref pState);
+        return 0x8007007E;
+    }
+}
+'@ -ErrorAction SilentlyContinue
 
 function Test-ControllerConnected {
     $devices = Get-PnpDevice | Where-Object { $_.FriendlyName -eq $controllerName -and $_.Status -eq "OK" }
@@ -32,6 +98,18 @@ function Test-ControllerConnected {
 function Test-SteamBigPicture {
     $steam = Get-Process -Name "steamwebhelper" -ErrorAction SilentlyContinue
     if ($steam -and $steam.MainWindowTitle -match "Big Picture") { return $true }
+    return $false
+}
+
+function Test-GuideButtonPressed {
+    for ($i = 0; $i -lt 4; $i++) {
+        $state = New-Object XINPUT_STATE
+        if ([XInput]::GetState($i, [ref]$state) -eq 0) {
+            if (($state.Gamepad.wButtons -band 0x0400) -ne 0) {
+                return $true
+            }
+        }
+    }
     return $false
 }
 
@@ -84,6 +162,10 @@ Write-Host "    Grace period: " -ForegroundColor DarkGray -NoNewline
 Write-Host "${GracePeriodSeconds}s" -ForegroundColor White
 Write-Host "    Win override: " -ForegroundColor DarkGray -NoNewline
 Write-Host "hold ${WinHoldSeconds}s" -ForegroundColor White
+
+$triggerMode = if ($AutoSwitch) { "Auto (on connect)" } else { "Guide button" }
+Write-Host "    Trigger: " -ForegroundColor DarkGray -NoNewline
+Write-Host $triggerMode -ForegroundColor White
 Write-Host ""
 
 # ─── State ────────────────────────────────────
@@ -93,13 +175,19 @@ $winHoldStartTime    = $null
 $winLastShown        = -1
     $manualOverride      = $false
     $overrideDirection   = $null    # "desktop" or "console"
+    $announcedController = $false
 
+Set-DesktopMode
 if (Test-ControllerConnected) {
-    $lastMode = $true
-    Set-ConsoleMode
-}
-else {
-    Set-DesktopMode
+    if ($AutoSwitch) {
+        Set-ConsoleMode
+        $lastMode = $true
+    }
+    else {
+        Write-Host "  [+] " -ForegroundColor Green -NoNewline
+        Write-Host "Controller detected — press Guide button to enter Console Mode" -ForegroundColor Green
+        $announcedController = $true
+    }
 }
 
 # ─── Main Loop ────────────────────────────────
@@ -182,6 +270,25 @@ while ($true) {
             $manualOverride    = $false
             $overrideDirection = $null
         }
+
+        if ($overrideDirection -eq "desktop" -and $controllerConnected) {
+            for ($tick = 0; $tick -lt 10; $tick++) {
+                if (Test-GuideButtonPressed) {
+                    Write-Host "  [G]" -ForegroundColor Green -NoNewline
+                    Write-Host " Guide button detected — entering Console Mode" -ForegroundColor Green
+                    Set-ConsoleMode
+                    $lastMode            = $true
+                    $disconnectStartTime = $null
+                    $manualOverride      = $false
+                    $overrideDirection   = $null
+                    break
+                }
+                Start-Sleep -Milliseconds 50
+            }
+        }
+        else {
+            Start-Sleep -Milliseconds 500
+        }
     }
     else {
         if ($controllerConnected) {
@@ -189,16 +296,50 @@ while ($true) {
                 $wasGone = [math]::Round(((Get-Date) - $disconnectStartTime).TotalSeconds, 0)
                 Write-Host "  [+]" -ForegroundColor Green -NoNewline
                 Write-Host " Controller reconnected after " -ForegroundColor White -NoNewline
-                Write-Host "${wasGone}s" -ForegroundColor Green -NoNewline
-                Write-Host " — staying in Console Mode" -ForegroundColor White
+                Write-Host "${wasGone}s" -ForegroundColor Green
                 $disconnectStartTime = $null
+                $announcedController = $false
             }
+
+            if (-not $announcedController) {
+                if ($AutoSwitch) {
+                    Write-Host "  [+] " -ForegroundColor Green -NoNewline
+                    Write-Host "Controller detected — entering Console Mode" -ForegroundColor Green
+                }
+                else {
+                    Write-Host "  [+] " -ForegroundColor Green -NoNewline
+                    Write-Host "Controller detected — press Guide button to enter Console Mode" -ForegroundColor Green
+                }
+                $announcedController = $true
+            }
+
             if (-not $lastMode) {
-                Set-ConsoleMode
-                $lastMode = $true
+                if ($AutoSwitch) {
+                    Set-ConsoleMode
+                    $lastMode = $true
+                }
+                else {
+                    for ($tick = 0; $tick -lt 10; $tick++) {
+                        if (Test-GuideButtonPressed) {
+                            Write-Host "  [G]" -ForegroundColor Green -NoNewline
+                            Write-Host " Guide button detected — entering Console Mode" -ForegroundColor Green
+                            Set-ConsoleMode
+                            $lastMode = $true
+                            break
+                        }
+                        Start-Sleep -Milliseconds 50
+                    }
+                }
+            }
+            else {
+                Start-Sleep -Milliseconds 500
             }
         }
         else {
+            if ($announcedController) {
+                $announcedController = $false
+            }
+
             if ($lastMode) {
                 if ($null -eq $disconnectStartTime) {
                     $disconnectStartTime = Get-Date
@@ -213,13 +354,14 @@ while ($true) {
                         Write-Host "  [!]" -ForegroundColor Red -NoNewline
                         Write-Host " Grace period expired — switching to Desktop Mode" -ForegroundColor Red
                         Set-DesktopMode
-                        $lastMode      = $false
+                        $lastMode            = $false
                         $disconnectStartTime = $null
+                        $announcedController = $false
                     }
                 }
             }
+
+            Start-Sleep -Milliseconds 500
         }
     }
-
-    Start-Sleep -Milliseconds 500
 }
