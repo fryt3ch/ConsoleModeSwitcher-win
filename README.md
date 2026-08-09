@@ -21,6 +21,8 @@
   <b>Windows only.</b>
 </p>
 
+<img width="1194" height="669" alt="image" src="https://github.com/user-attachments/assets/bca02555-2514-4de9-b72b-7f92a830d520" />
+
 ---
 
 ## How It Works
