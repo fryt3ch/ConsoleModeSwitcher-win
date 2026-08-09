@@ -147,14 +147,21 @@ Right-click **MonitorSwitcherGUI** → *Load configuration* — both profiles sh
 
 ### 3. HDMI switching (Android / Google TV)
 
-Most Android TV integrations in HA do **not** support `select_source`. Use `-TVHdmiUri` with a deep-link URI to switch HDMI inputs:
+Most Android TV integrations in HA do **not** support `select_source`. Use `-TVHdmiUri`
+with a deep-link URI to switch HDMI inputs.
 
-**Standard TCL keycodes for `play_media`:**
-```
-HDMI 1:  content://android.media.tv/passthrough/com.tcl.tvinput%2F...HW1413744128
-HDMI 2:  content://android.media.tv/passthrough/com.tcl.tvinput%2F...HW1413744384
-HDMI 3:  content://android.media.tv/passthrough/com.tcl.tvinput%2F...HW1413744640
-```
+#### Known HDMI URIs
+
+Use these with `-TVHdmiUri`. If your TV model isn't listed, find the URI by running
+`adb shell dumpsys tv input` on your Android TV device.
+
+**TCL Google TV**
+
+| Input | URI |
+|-------|-----|
+| HDMI 1 | `content://android.media.tv/passthrough/com.tcl.tvinput%2F.passthroughinput.TvPassThroughService%2FHW1413744128` |
+| HDMI 2 | `content://android.media.tv/passthrough/com.tcl.tvinput%2F.passthroughinput.TvPassThroughService%2FHW1413744129` |
+| HDMI 3 | `content://android.media.tv/passthrough/com.tcl.tvinput%2F.passthroughinput.TvPassThroughService%2FHW1413744130` |
 
 ### 4. Home screen on exit (`-TVAutoHome`)
 
