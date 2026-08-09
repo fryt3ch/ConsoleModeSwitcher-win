@@ -56,7 +56,7 @@ The script polls controller presence every 500ms. By default it waits for the **
 | `DesktopMode` | `string` | `Desktop` | Profile name for desktop mode (without `.xml`) |
 | `ProfilesDir` | `string` | `$env:APPDATA\MonitorSwitcher\Profiles` | Folder containing `.xml` profiles |
 | `Tool` | `string` | `.\MonitorProfileSwitcher\MonitorSwitcher.exe` | Path to `MonitorSwitcher.exe` |
-| `ControllerName` | `string` | `Xbox 360 Controller for Windows` | PnP friendly name to detect |
+
 | `GracePeriodSeconds` | `int` | `300` | Seconds to wait before switching to desktop after disconnect |
 | `WinHoldSeconds` | `int` | `2` | Seconds to hold Win key for manual override |
 

@@ -3,7 +3,7 @@ param(
     [string]$DesktopMode = "Desktop",
     [string]$ProfilesDir = "$env:APPDATA\MonitorSwitcher\Profiles",
     [string]$Tool = ".\MonitorProfileSwitcher\MonitorSwitcher.exe",
-    [string]$ControllerName = "Xbox 360 Controller for Windows",
+
     [int]$GracePeriodSeconds = 300,
     [int]$WinHoldSeconds = 2,
     [switch]$AutoSwitch,
@@ -100,8 +100,13 @@ public class XInput {
 '@ -ErrorAction SilentlyContinue
 
 function Test-ControllerConnected {
-    $devices = Get-PnpDevice | Where-Object { $_.FriendlyName -eq $controllerName -and $_.Status -eq "OK" }
-    return [bool]$devices
+    for ($i = 0; $i -lt 4; $i++) {
+        $state = New-Object XINPUT_STATE
+        if ([XInput]::GetState($i, [ref]$state) -eq 0) {
+            return $true
+        }
+    }
+    return $false
 }
 
 function Test-SteamBigPicture {
@@ -123,8 +128,9 @@ function Test-GuideButtonPressed {
 }
 
 function Test-WinHeld {
-    $keyState = [NativeMethods]::GetAsyncKeyState(0x5B)
-    return ($keyState -band 0x8000) -ne 0
+    $leftWin  = [NativeMethods]::GetAsyncKeyState(0x5B)
+    $rightWin = [NativeMethods]::GetAsyncKeyState(0x5C)
+    return (($leftWin -band 0x8000) -ne 0) -or (($rightWin -band 0x8000) -ne 0)
 }
 
 function Invoke-HAService($domain, $service, $entity, $extraData) {
@@ -137,7 +143,8 @@ function Invoke-HAService($domain, $service, $entity, $extraData) {
         $null = Invoke-RestMethod -Uri $uri -Method Post `
             -Headers @{ Authorization = "Bearer $HAToken" } `
             -Body $json `
-            -ContentType "application/json"
+            -ContentType "application/json" `
+            -TimeoutSec 5
         return $true
     }
     catch {
@@ -153,12 +160,16 @@ function Set-ConsoleMode {
     if ($TVControl) {
         Write-Host "  [*]" -ForegroundColor Cyan -NoNewline
         Write-Host " Turning on TV..." -ForegroundColor White
-        Invoke-HAService "media_player" "turn_on" $TVEntity
-
-        Start-Sleep -Seconds $TVStartupSeconds
-
-        Write-Host "  [*]" -ForegroundColor Cyan -NoNewline
-        Write-Host " TV ready" -ForegroundColor Green
+        $ok = Invoke-HAService "media_player" "turn_on" $TVEntity
+        if ($ok) {
+            Start-Sleep -Seconds $TVStartupSeconds
+            Write-Host "  [*]" -ForegroundColor Cyan -NoNewline
+            Write-Host " TV ready" -ForegroundColor Green
+        }
+        else {
+            Write-Host "  [!] " -ForegroundColor Yellow -NoNewline
+            Write-Host "Failed to turn on TV — continuing..." -ForegroundColor Yellow
+        }
 
         if ($TVSource) {
             Write-Host "  [*]" -ForegroundColor Cyan -NoNewline
@@ -194,7 +205,7 @@ function Set-ConsoleMode {
     Write-Host "  [*]" -ForegroundColor Cyan -NoNewline
     Write-Host " Loading profile: " -ForegroundColor White -NoNewline
     Write-Host $ConsoleMode -ForegroundColor Green
-    & $tool -load:$consoleModeConfig
+    & $Tool -load:$consoleModeConfig
     Start-Sleep -Milliseconds 2000
 
     Write-Host "  [*]" -ForegroundColor Cyan -NoNewline
@@ -232,8 +243,8 @@ function Set-DesktopMode {
 
     Write-Host "  [*]" -ForegroundColor Cyan -NoNewline
     Write-Host " Loading profile: " -ForegroundColor White -NoNewline
-    Write-Host "Desktop" -ForegroundColor Blue
-    & $tool -load:$desktopModeConfig
+    Write-Host $DesktopMode -ForegroundColor Blue
+    & $Tool -load:$desktopModeConfig
     Start-Sleep -Milliseconds 2000
 
     Write-Host "  [+] " -ForegroundColor Blue -NoNewline
@@ -279,9 +290,9 @@ $lastMode            = $false
 $disconnectStartTime = $null
 $winHoldStartTime    = $null
 $winLastShown        = -1
-    $manualOverride      = $false
-    $overrideDirection   = $null    # "desktop" or "console"
-    $announcedController = $false
+$manualOverride      = $false
+$overrideDirection   = $null    # "desktop" or "console"
+$announcedController = $false
 
 if (Test-ControllerConnected) {
     if ($AutoSwitch) {
@@ -296,144 +307,100 @@ if (Test-ControllerConnected) {
 }
 
 # ─── Main Loop ────────────────────────────────
-while ($true) {
+try {
+    while ($true) {
 
-    $winHeld = Test-WinHeld
+        $winHeld = Test-WinHeld
 
-    # ── Win hold tracking ──
-    if ($winHeld) {
-        if ($null -eq $winHoldStartTime) {
-            $winHoldStartTime = Get-Date
-            $targetMode = if ($lastMode) { "Desktop" } else { "Console" }
-            Write-Host "  [WIN]" -ForegroundColor Yellow -NoNewline
-            Write-Host " Hold for " -ForegroundColor DarkYellow -NoNewline
-            Write-Host "${WinHoldSeconds}s" -ForegroundColor Yellow -NoNewline
-            Write-Host " to force $targetMode Mode" -ForegroundColor DarkYellow
-        }
-        else {
-            $winElapsed    = ((Get-Date) - $winHoldStartTime).TotalSeconds
-            $winRemaining  = [math]::Max(0, $WinHoldSeconds - [math]::Floor($winElapsed))
-            if ($winRemaining -ne $winLastShown) {
-                if ($winRemaining -gt 0) {
-                    Write-Host "  [WIN]" -ForegroundColor Yellow -NoNewline
-                    Write-Host "  " -NoNewline
-                    Write-Host "$winRemaining..." -ForegroundColor DarkYellow
+        # ── Win hold tracking ──
+        if ($winHeld) {
+            if ($null -eq $winHoldStartTime) {
+                $winHoldStartTime = Get-Date
+                $targetMode = if ($lastMode) { "Desktop" } else { "Console" }
+                Write-Host "  [WIN]" -ForegroundColor Yellow -NoNewline
+                Write-Host " Hold for " -ForegroundColor DarkYellow -NoNewline
+                Write-Host "${WinHoldSeconds}s" -ForegroundColor Yellow -NoNewline
+                Write-Host " to force $targetMode Mode" -ForegroundColor DarkYellow
+            }
+            else {
+                $winElapsed    = ((Get-Date) - $winHoldStartTime).TotalSeconds
+                $winRemaining  = [math]::Max(0, $WinHoldSeconds - [math]::Floor($winElapsed))
+                if ($winRemaining -ne $winLastShown) {
+                    if ($winRemaining -gt 0) {
+                        Write-Host "  [WIN]" -ForegroundColor Yellow -NoNewline
+                        Write-Host "  " -NoNewline
+                        Write-Host "$winRemaining..." -ForegroundColor DarkYellow
+                    }
+                    $winLastShown = $winRemaining
                 }
-                $winLastShown = $winRemaining
             }
         }
-    }
-    else {
-        if ($null -ne $winHoldStartTime) {
-            $heldFor = [math]::Round(((Get-Date) - $winHoldStartTime).TotalSeconds, 1)
-            if ($heldFor -lt $WinHoldSeconds) {
-                Write-Host "  [WIN]" -ForegroundColor DarkGray -NoNewline
-                Write-Host " Released after ${heldFor}s — cancelled" -ForegroundColor DarkGray
+        else {
+            if ($null -ne $winHoldStartTime) {
+                $heldFor = [math]::Round(((Get-Date) - $winHoldStartTime).TotalSeconds, 1)
+                if ($heldFor -lt $WinHoldSeconds) {
+                    Write-Host "  [WIN]" -ForegroundColor DarkGray -NoNewline
+                    Write-Host " Released after ${heldFor}s — cancelled" -ForegroundColor DarkGray
+                }
+                $winHoldStartTime = $null
+                $winLastShown     = -1
+            }
+        }
+
+        # ── Win override trigger ──
+        if ($null -ne $winHoldStartTime -and ((Get-Date) - $winHoldStartTime).TotalSeconds -ge $WinHoldSeconds) {
+            if ($lastMode) {
+                Write-Host "  [WIN]" -ForegroundColor Red -NoNewline
+                Write-Host " Override triggered — forcing Desktop Mode" -ForegroundColor Red
+                Set-DesktopMode
+                $lastMode            = $false
+                $disconnectStartTime = $null
+                $manualOverride      = $true
+                $overrideDirection   = "desktop"
+            }
+            else {
+                Write-Host "  [WIN]" -ForegroundColor Green -NoNewline
+                Write-Host " Override triggered — forcing Console Mode" -ForegroundColor Green
+                Set-ConsoleMode
+                $lastMode            = $true
+                $disconnectStartTime = $null
+                $manualOverride      = $true
+                $overrideDirection   = "console"
             }
             $winHoldStartTime = $null
             $winLastShown     = -1
         }
-    }
 
-    # ── Win override trigger ──
-    if ($null -ne $winHoldStartTime -and ((Get-Date) - $winHoldStartTime).TotalSeconds -ge $WinHoldSeconds) {
-        if ($lastMode) {
-            Write-Host "  [WIN]" -ForegroundColor Red -NoNewline
-            Write-Host " Override triggered — forcing Desktop Mode" -ForegroundColor Red
-            Set-DesktopMode
-            $lastMode            = $false
-            $disconnectStartTime = $null
-            $manualOverride      = $true
-            $overrideDirection   = "desktop"
-        }
-        else {
-            Write-Host "  [WIN]" -ForegroundColor Green -NoNewline
-            Write-Host " Override triggered — forcing Console Mode" -ForegroundColor Green
-            Set-ConsoleMode
-            $lastMode            = $true
-            $disconnectStartTime = $null
-            $manualOverride      = $true
-            $overrideDirection   = "console"
-        }
-        $winHoldStartTime = $null
-        $winLastShown     = -1
-    }
+        # ── Controller check ──
+        $controllerConnected = Test-ControllerConnected
 
-    # ── Controller check ──
-    $controllerConnected = Test-ControllerConnected
-
-    if ($manualOverride) {
-        if ($overrideDirection -eq "desktop" -and -not $controllerConnected) {
-            Write-Host "  [o]" -ForegroundColor DarkGray -NoNewline
-            Write-Host " Manual override cleared — ready for next connect" -ForegroundColor DarkGray
-            $manualOverride    = $false
-            $overrideDirection = $null
-        }
-        elseif ($overrideDirection -eq "console" -and $controllerConnected) {
-            Write-Host "  [o]" -ForegroundColor DarkGray -NoNewline
-            Write-Host " Manual override cleared — controller present, resuming normal operation" -ForegroundColor DarkGray
-            $manualOverride    = $false
-            $overrideDirection = $null
-        }
-
-        if ($overrideDirection -eq "desktop" -and $controllerConnected) {
-            for ($tick = 0; $tick -lt 10; $tick++) {
-                if (Test-GuideButtonPressed) {
-                    Write-Host "  [G]" -ForegroundColor Green -NoNewline
-                    Write-Host " Guide button detected — entering Console Mode" -ForegroundColor Green
-                    Set-ConsoleMode
-                    $lastMode            = $true
-                    $disconnectStartTime = $null
-                    $manualOverride      = $false
-                    $overrideDirection   = $null
-                    break
-                }
-                Start-Sleep -Milliseconds 50
+        if ($manualOverride) {
+            if ($overrideDirection -eq "desktop" -and -not $controllerConnected) {
+                Write-Host "  [o]" -ForegroundColor DarkGray -NoNewline
+                Write-Host " Manual override cleared — ready for next connect" -ForegroundColor DarkGray
+                $manualOverride    = $false
+                $overrideDirection = $null
             }
-        }
-        else {
-            Start-Sleep -Milliseconds 500
-        }
-    }
-    else {
-        if ($controllerConnected) {
-            if ($null -ne $disconnectStartTime) {
-                $wasGone = [math]::Round(((Get-Date) - $disconnectStartTime).TotalSeconds, 0)
-                Write-Host "  [+]" -ForegroundColor Green -NoNewline
-                Write-Host " Controller reconnected after " -ForegroundColor White -NoNewline
-                Write-Host "${wasGone}s" -ForegroundColor Green
-                $disconnectStartTime = $null
-                $announcedController = $false
+            elseif ($overrideDirection -eq "console" -and $controllerConnected) {
+                Write-Host "  [o]" -ForegroundColor DarkGray -NoNewline
+                Write-Host " Manual override cleared — controller present, resuming normal operation" -ForegroundColor DarkGray
+                $manualOverride    = $false
+                $overrideDirection = $null
             }
 
-            if (-not $announcedController) {
-                if ($AutoSwitch) {
-                    Write-Host "  [+] " -ForegroundColor Green -NoNewline
-                    Write-Host "Controller detected — entering Console Mode" -ForegroundColor Green
-                }
-                else {
-                    Write-Host "  [+] " -ForegroundColor Green -NoNewline
-                    Write-Host "Controller detected — press Guide button to enter Console Mode" -ForegroundColor Green
-                }
-                $announcedController = $true
-            }
-
-            if (-not $lastMode) {
-                if ($AutoSwitch) {
-                    Set-ConsoleMode
-                    $lastMode = $true
-                }
-                else {
-                    for ($tick = 0; $tick -lt 10; $tick++) {
-                        if (Test-GuideButtonPressed) {
-                            Write-Host "  [G]" -ForegroundColor Green -NoNewline
-                            Write-Host " Guide button detected — entering Console Mode" -ForegroundColor Green
-                            Set-ConsoleMode
-                            $lastMode = $true
-                            break
-                        }
-                        Start-Sleep -Milliseconds 50
+            if ($overrideDirection -eq "desktop" -and $controllerConnected) {
+                for ($tick = 0; $tick -lt 10; $tick++) {
+                    if (Test-GuideButtonPressed) {
+                        Write-Host "  [G]" -ForegroundColor Green -NoNewline
+                        Write-Host " Guide button detected — entering Console Mode" -ForegroundColor Green
+                        Set-ConsoleMode
+                        $lastMode            = $true
+                        $disconnectStartTime = $null
+                        $manualOverride      = $false
+                        $overrideDirection   = $null
+                        break
                     }
+                    Start-Sleep -Milliseconds 50
                 }
             }
             else {
@@ -441,32 +408,88 @@ while ($true) {
             }
         }
         else {
-            if ($announcedController) {
-                $announcedController = $false
-            }
-
-            if ($lastMode) {
-                if ($null -eq $disconnectStartTime) {
-                    $disconnectStartTime = Get-Date
-                    Write-Host "  [-]" -ForegroundColor Yellow -NoNewline
-                    Write-Host " Controller disconnected — " -ForegroundColor White -NoNewline
-                    Write-Host "waiting ${GracePeriodSeconds}s" -ForegroundColor Yellow -NoNewline
-                    Write-Host " before switching..." -ForegroundColor White
+            if ($controllerConnected) {
+                if ($null -ne $disconnectStartTime) {
+                    $wasGone = [math]::Round(((Get-Date) - $disconnectStartTime).TotalSeconds, 0)
+                    Write-Host "  [+]" -ForegroundColor Green -NoNewline
+                    Write-Host " Controller reconnected after " -ForegroundColor White -NoNewline
+                    Write-Host "${wasGone}s" -ForegroundColor Green
+                    $disconnectStartTime = $null
+                    $announcedController = $false
                 }
-                else {
-                    $elapsed = ((Get-Date) - $disconnectStartTime).TotalSeconds
-                    if ($elapsed -ge $GracePeriodSeconds) {
-                        Write-Host "  [!]" -ForegroundColor Red -NoNewline
-                        Write-Host " Grace period expired — switching to Desktop Mode" -ForegroundColor Red
-                        Set-DesktopMode
-                        $lastMode            = $false
-                        $disconnectStartTime = $null
-                        $announcedController = $false
+
+                if (-not $announcedController) {
+                    if ($AutoSwitch) {
+                        Write-Host "  [+] " -ForegroundColor Green -NoNewline
+                        Write-Host "Controller detected — entering Console Mode" -ForegroundColor Green
+                    }
+                    else {
+                        Write-Host "  [+] " -ForegroundColor Green -NoNewline
+                        Write-Host "Controller detected — press Guide button to enter Console Mode" -ForegroundColor Green
+                    }
+                    $announcedController = $true
+                }
+
+                if (-not $lastMode) {
+                    if ($AutoSwitch) {
+                        Set-ConsoleMode
+                        $lastMode = $true
+                    }
+                    else {
+                        for ($tick = 0; $tick -lt 10; $tick++) {
+                            if (Test-GuideButtonPressed) {
+                                Write-Host "  [G]" -ForegroundColor Green -NoNewline
+                                Write-Host " Guide button detected — entering Console Mode" -ForegroundColor Green
+                                Set-ConsoleMode
+                                $lastMode = $true
+                                break
+                            }
+                            Start-Sleep -Milliseconds 50
+                        }
                     }
                 }
+                else {
+                    Start-Sleep -Milliseconds 500
+                }
             }
+            else {
+                if ($announcedController) {
+                    $announcedController = $false
+                }
 
-            Start-Sleep -Milliseconds 500
+                if ($lastMode) {
+                    if ($null -eq $disconnectStartTime) {
+                        $disconnectStartTime = Get-Date
+                        Write-Host "  [-]" -ForegroundColor Yellow -NoNewline
+                        Write-Host " Controller disconnected — " -ForegroundColor White -NoNewline
+                        Write-Host "waiting ${GracePeriodSeconds}s" -ForegroundColor Yellow -NoNewline
+                        Write-Host " before switching..." -ForegroundColor White
+                    }
+                    else {
+                        $elapsed = ((Get-Date) - $disconnectStartTime).TotalSeconds
+                        if ($elapsed -ge $GracePeriodSeconds) {
+                            Write-Host "  [!]" -ForegroundColor Red -NoNewline
+                            Write-Host " Grace period expired — switching to Desktop Mode" -ForegroundColor Red
+                            Set-DesktopMode
+                            $lastMode            = $false
+                            $disconnectStartTime = $null
+                            $announcedController = $false
+                        }
+                    }
+                }
+
+                Start-Sleep -Milliseconds 500
+            }
         }
+    }
+}
+finally {
+    Write-Host ""
+    Write-Host "  [i] " -ForegroundColor DarkGray -NoNewline
+    Write-Host "Shutting down..." -ForegroundColor DarkGray
+    if ($lastMode) {
+        Write-Host "  [*] " -ForegroundColor Cyan -NoNewline
+        Write-Host "Restoring Desktop Mode..." -ForegroundColor White
+        Set-DesktopMode
     }
 }
