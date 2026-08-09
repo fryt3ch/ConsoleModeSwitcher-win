@@ -15,8 +15,7 @@ param(
     [string]$TVHdmiUri,
     [int]$TVStartupSeconds = 5,
     [switch]$TVAutoOff,
-    [switch]$TVAutoHome,
-    [string]$TVRemoteEntity = "remote.tv"
+    [switch]$TVAutoHome
 )
 
 $consoleModeConfig = Join-Path $ProfilesDir "$ConsoleMode.xml"
@@ -214,9 +213,10 @@ function Set-DesktopMode {
 
     if ($TVControl) {
         if ($TVAutoHome) {
+            $remoteEntity = $TVEntity -replace '^media_player\.', 'remote.'
             Write-Host "  [*]" -ForegroundColor Cyan -NoNewline
             Write-Host " Switching TV to home screen..." -ForegroundColor White
-            $ok = Invoke-HAService "remote" "send_command" $TVRemoteEntity @{ command = "HOME" }
+            $ok = Invoke-HAService "remote" "send_command" $remoteEntity @{ command = "HOME" }
             if (-not $ok) {
                 Write-Host "  [!] " -ForegroundColor Yellow -NoNewline
                 Write-Host "send_command failed — skipping home screen" -ForegroundColor Yellow
@@ -267,7 +267,7 @@ if ($TVControl) {
     $tvInfo = "$TVEntity  |  Startup: ${TVStartupSeconds}s"
     if ($TVSource) { $tvInfo += "  |  $TVSource" }
     elseif ($TVHdmiUri) { $tvInfo += "  |  play_media" }
-    if ($TVAutoHome) { $tvInfo += "  |  home on exit ($TVRemoteEntity)" }
+    if ($TVAutoHome) { $tvInfo += "  |  home on exit" }
     if ($TVAutoOff) { $tvInfo += "  |  off on exit" }
     Write-Host "    TV Control: " -ForegroundColor DarkGray -NoNewline
     Write-Host $tvInfo -ForegroundColor White

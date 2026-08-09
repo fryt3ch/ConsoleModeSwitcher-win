@@ -79,7 +79,6 @@ All require `-TVControl` to be set.
 | `TVStartupSeconds` | `int` | `5` | Delay after TV power-on before proceeding |
 | `TVAutoHome` | `switch` | `✗` | Switch TV to home screen via `remote.send_command HOME` on exit |
 | `TVAutoOff` | `switch` | `✗` | Turn off TV on exit |
-| `TVRemoteEntity` | `string` | `remote.tv` | HA remote entity for `send_command` (used with `-TVAutoHome`) |
 
 ## Creating Profiles
 
@@ -159,8 +158,7 @@ HDMI 3:  content://android.media.tv/passthrough/com.tcl.tvinput%2F...HW141374464
 
 ### 4. Home screen on exit (`-TVAutoHome`)
 
-Uses `remote.send_command` with `HOME` command on `-TVRemoteEntity` (default: `remote.tv`).
-Set it to match your TV's remote entity (e.g. `remote.googletv4948`).
+Uses `remote.send_command` with `HOME` command. The remote entity is derived automatically from `-TVEntity` by replacing `media_player.` with `remote.` (e.g. `media_player.googletv4948` → `remote.googletv4948`).
 
 ## Guide Button Support
 
