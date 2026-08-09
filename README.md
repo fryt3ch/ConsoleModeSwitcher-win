@@ -10,10 +10,11 @@
 </p>
 
 <p align="center">
-  <b>Auto-switch monitor profiles when you connect/disconnect a gamepad.</b><br/>
-  Detects Xbox 360 / Xbox One / Xbox Series controllers via PnP, loads the matching
-  <code>MonitorSwitcher</code> profile, and launches/closes Steam Big Picture.<br/>
-  Includes a grace period and a Win-key override for manual control.
+  <b>Switch to console mode by pressing the Xbox Guide button.</b><br/>
+  Detects gamepad via PnP, waits for Guide button press, then loads the matching
+  <code>MonitorSwitcher</code> profile and launches Steam Big Picture.<br/>
+  Optionally controls your TV (power on/off, HDMI switch, home screen) via
+  <b>Home Assistant</b>.
 </p>
 
 <p align="center">
@@ -24,22 +25,28 @@
 
 ## How It Works
 
-The script polls controller presence via `Get-PnpDevice` and switches modes automatically.
+The script polls controller presence every 500ms. By default it waits for the **Xbox Guide button** press — it does **not** switch automatically on connect.
 
 | Event | Action |
 |-------|--------|
-| **Controller connected** | Load console profile, launch Steam Big Picture |
-| **Controller disconnected + grace period expires** | Load desktop profile, close Steam Big Picture |
+| **Controller connected** | Prints detection message, waits for Guide button |
+| **Guide button pressed** | Turns on TV (if `-TVControl`), switches HDMI, loads console profile, launches Steam BPM |
+| **Controller disconnected + grace period expires** | Switches TV to home screen (if `-TVAutoHome`), turns off TV (if `-TVAutoOff`), loads desktop profile |
+| **`-AutoSwitch` flag** | Switches to console mode immediately when the controller connects (old behavior) |
 | **Win key held for 2s** | Manual override — force-switch to the opposite mode |
 
-A grace period (default 300s) prevents accidental switching when the controller briefly disconnects.
+> Guide button detection requires [DirectX End-User Runtime](#guide-button-support) (`xinput1_3.dll`).
+> If not installed, use `-AutoSwitch` instead.
 
 ## Dependencies
 
 - [**MonitorSwitcher**](https://github.com/cooolinho/monitor-profile-switcher) (`MonitorSwitcher.exe`) — loads and saves monitor configurations. Download from [SourceForge](https://sourceforge.net/projects/monitorswitcher/).
 - Monitor profiles (`.xml`) saved via MonitorSwitcherGUI — one for console mode, one for desktop.
+- **Home Assistant** (optional) — if you want TV power/HDMI/home-screen control. Requires a [long-lived access token](https://www.home-assistant.io/docs/authentication/#your-account-profile).
 
 ## Parameters
+
+### Core
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -48,8 +55,31 @@ A grace period (default 300s) prevents accidental switching when the controller 
 | `ProfilesDir` | `string` | `$env:APPDATA\MonitorSwitcher\Profiles` | Folder containing `.xml` profiles |
 | `Tool` | `string` | `.\MonitorProfileSwitcher\MonitorSwitcher.exe` | Path to `MonitorSwitcher.exe` |
 | `ControllerName` | `string` | `Xbox 360 Controller for Windows` | PnP friendly name to detect |
-| `GracePeriodSeconds` | `int` | `300` | Time (s) to wait before switching to desktop after disconnect |
-| `WinHoldSeconds` | `int` | `2` | Time (s) to hold Win key for manual override |
+| `GracePeriodSeconds` | `int` | `300` | Seconds to wait before switching to desktop after disconnect |
+| `WinHoldSeconds` | `int` | `2` | Seconds to hold Win key for manual override |
+
+### Guide Button
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `AutoSwitch` | `switch` | `✗` | Switch to console mode immediately on controller connect (disables guide button wait) |
+
+### TV Control (Home Assistant)
+
+All require `-TVControl` to be set.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `TVControl` | `switch` | `✗` | Enable TV control via Home Assistant |
+| `HAServer` | `string` | `http://homeassistant.local:8123` | Home Assistant server URL |
+| `HAToken` | `string` | *required* | HA long-lived access token |
+| `TVEntity` | `string` | `media_player.tv` | HA entity ID of your TV |
+| `TVSource` | `string` | — | HDMI input name for `select_source` (e.g. `"HDMI 1"`) |
+| `TVHdmiUri` | `string` | — | Deep-link URI for `play_media` HDMI switch (Android TV fallback) |
+| `TVStartupSeconds` | `int` | `5` | Delay after TV power-on before proceeding |
+| `TVAutoHome` | `switch` | `✗` | Switch TV to home screen via `remote.send_command HOME` on exit |
+| `TVAutoOff` | `switch` | `✗` | Turn off TV on exit |
+| `TVRemoteEntity` | `string` | `remote.tv` | HA remote entity for `send_command` (used with `-TVAutoHome`) |
 
 ## Creating Profiles
 
@@ -81,9 +111,66 @@ Right-click **MonitorSwitcherGUI** → *Load configuration* — both profiles sh
 ## Usage
 
 ```powershell
+# Default: wait for Guide button, no TV control
 .\ConsoleModeSwitcher.ps1
-.\ConsoleModeSwitcher.ps1 -ConsoleMode "TV_4K_60" -DesktopMode "Work" -GracePeriodSeconds 600
+
+# Old behavior: auto-switch on controller connect
+.\ConsoleModeSwitcher.ps1 -AutoSwitch
+
+# Full setup: Guide button + TV on/off + home screen on exit
+.\ConsoleModeSwitcher.ps1 `
+    -TVControl -HAToken "eyJhbGci..." `
+    -TVEntity "media_player.googletv4948" `
+    -TVHdmiUri "content://android.media.tv/passthrough/com.tcl.tvinput%2F...HW1413744128" `
+    -TVAutoHome -TVAutoOff
+
+# With explicit HDMI source (select_source in HA)
+.\ConsoleModeSwitcher.ps1 `
+    -TVControl -HAToken "eyJhbGci..." `
+    -TVEntity "media_player.living_room_tv" `
+    -TVSource "HDMI 1" -TVAutoHome -TVAutoOff
 ```
+
+## TV Control Setup
+
+### 1. Get a Home Assistant token
+
+1. Open your **HA profile** (icon in bottom-left corner)
+2. Scroll to **Long-Lived Access Tokens** → **Create Token**
+3. Give it a name (e.g. `"Console Mode Switcher"`) → **OK**
+4. Copy the token — it is shown **only once**
+
+### 2. Find your TV entity
+
+1. In HA: **Developer Tools** → **States**
+2. Filter by `media_player.` — find your TV's entity ID
+3. Example: `media_player.googletv4948`, `media_player.living_room_tv`
+
+### 3. HDMI switching (Android / Google TV)
+
+Most Android TV integrations in HA do **not** support `select_source`. Use `-TVHdmiUri` with a deep-link URI to switch HDMI inputs:
+
+**Standard TCL keycodes for `play_media`:**
+```
+HDMI 1:  content://android.media.tv/passthrough/com.tcl.tvinput%2F...HW1413744128
+HDMI 2:  content://android.media.tv/passthrough/com.tcl.tvinput%2F...HW1413744384
+HDMI 3:  content://android.media.tv/passthrough/com.tcl.tvinput%2F...HW1413744640
+```
+
+### 4. Home screen on exit (`-TVAutoHome`)
+
+Uses `remote.send_command` with `HOME` command on `-TVRemoteEntity` (default: `remote.tv`).
+Set it to match your TV's remote entity (e.g. `remote.googletv4948`).
+
+## Guide Button Support
+
+The guide button (central Xbox button) is detected via the **undocumented** `XInputGetState` at ordinal #100 in `xinput1_3.dll`.
+
+This DLL is part of the [DirectX End-User Runtime (June 2010)](https://www.microsoft.com/en-us/download/details.aspx?id=8109).
+
+**If the guide button doesn't work:**
+- Install the DirectX Runtime from the link above
+- Or use `-AutoSwitch` to revert to auto-switch-on-connect behavior
 
 ## Auto-start via Task Scheduler
 
