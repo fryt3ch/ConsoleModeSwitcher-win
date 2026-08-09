@@ -5,7 +5,17 @@ param(
     [string]$Tool = ".\MonitorProfileSwitcher\MonitorSwitcher.exe",
     [string]$ControllerName = "Xbox 360 Controller for Windows",
     [int]$GracePeriodSeconds = 300,
-    [int]$WinHoldSeconds = 2
+    [int]$WinHoldSeconds = 2,
+    [switch]$AutoSwitch,
+    [switch]$TVControl,
+    [string]$HAServer  = "http://homeassistant.local:8123",
+    [string]$HAToken,
+    [string]$TVEntity  = "media_player.tv",
+    [string]$TVSource,
+    [string]$TVHdmiUri,
+    [int]$TVStartupSeconds = 5,
+    [switch]$TVAutoOff,
+    [switch]$TVAutoHome
 )
 
 $consoleModeConfig = Join-Path $ProfilesDir "$ConsoleMode.xml"
@@ -22,7 +32,72 @@ public class NativeMethods {
     [DllImport("user32.dll")]
     public static extern short GetAsyncKeyState(int vKey);
 }
-'@
+
+[StructLayout(LayoutKind.Sequential)]
+public struct XINPUT_GAMEPAD {
+    public ushort wButtons;
+    public byte bLeftTrigger;
+    public byte bRightTrigger;
+    public short sThumbLX;
+    public short sThumbLY;
+    public short sThumbRX;
+    public short sThumbRY;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public struct XINPUT_STATE {
+    public uint dwPacketNumber;
+    public XINPUT_GAMEPAD Gamepad;
+}
+
+public class XInput {
+    private delegate uint GetStateDelegate(uint dwUserIndex, ref XINPUT_STATE pState);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr LoadLibrary(string lpFileName);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr GetProcAddress(IntPtr hModule, string lpProcName);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr GetProcAddress(IntPtr hModule, IntPtr lpProcName);
+
+    private static GetStateDelegate _getStateFn = null;
+    private static bool _resolved = false;
+
+    private static void Resolve() {
+        if (_resolved) return;
+        _resolved = true;
+
+        string[] dlls = { "xinput1_4.dll", "xinput1_3.dll", "xinput9_1_0.dll" };
+
+        for (int i = 0; i < dlls.Length; i++) {
+            IntPtr hModule = LoadLibrary(dlls[i]);
+            if (hModule == IntPtr.Zero) continue;
+
+            IntPtr fn100 = GetProcAddress(hModule, (IntPtr)100);
+            if (fn100 != IntPtr.Zero) {
+                _getStateFn = (GetStateDelegate)Marshal.GetDelegateForFunctionPointer(
+                    fn100, typeof(GetStateDelegate));
+                return;
+            }
+
+            IntPtr fn = GetProcAddress(hModule, "XInputGetState");
+            if (fn != IntPtr.Zero) {
+                _getStateFn = (GetStateDelegate)Marshal.GetDelegateForFunctionPointer(
+                    fn, typeof(GetStateDelegate));
+                return;
+            }
+        }
+    }
+
+    public static uint GetState(uint dwUserIndex, ref XINPUT_STATE pState) {
+        if (!_resolved) Resolve();
+        if (_getStateFn != null) return _getStateFn(dwUserIndex, ref pState);
+        return 0x8007007E;
+    }
+}
+'@ -ErrorAction SilentlyContinue
 
 function Test-ControllerConnected {
     $devices = Get-PnpDevice | Where-Object { $_.FriendlyName -eq $controllerName -and $_.Status -eq "OK" }
@@ -35,12 +110,87 @@ function Test-SteamBigPicture {
     return $false
 }
 
+function Test-GuideButtonPressed {
+    for ($i = 0; $i -lt 4; $i++) {
+        $state = New-Object XINPUT_STATE
+        if ([XInput]::GetState($i, [ref]$state) -eq 0) {
+            if (($state.Gamepad.wButtons -band 0x0400) -ne 0) {
+                return $true
+            }
+        }
+    }
+    return $false
+}
+
 function Test-WinHeld {
     $keyState = [NativeMethods]::GetAsyncKeyState(0x5B)
     return ($keyState -band 0x8000) -ne 0
 }
 
+function Invoke-HAService($domain, $service, $entity, $extraData) {
+    $body = @{ entity_id = $entity }
+    if ($extraData) { $body += $extraData }
+    $uri = "$HAServer/api/services/$domain/$service"
+    $json = $body | ConvertTo-Json -Compress -Depth 3
+
+    try {
+        $null = Invoke-RestMethod -Uri $uri -Method Post `
+            -Headers @{ Authorization = "Bearer $HAToken" } `
+            -Body $json `
+            -ContentType "application/json"
+        return $true
+    }
+    catch {
+        if ($_.ErrorDetails.Message) {
+            Write-Host "    [!] " -ForegroundColor Red -NoNewline
+            Write-Host "$($_.ErrorDetails.Message)" -ForegroundColor Red
+        }
+        return $false
+    }
+}
+
 function Set-ConsoleMode {
+    if ($TVControl) {
+        Write-Host "  [*]" -ForegroundColor Cyan -NoNewline
+        Write-Host " Turning on TV..." -ForegroundColor White
+        Invoke-HAService "media_player" "turn_on" $TVEntity
+
+        Start-Sleep -Seconds $TVStartupSeconds
+
+        Write-Host "  [*]" -ForegroundColor Cyan -NoNewline
+        Write-Host " TV ready" -ForegroundColor Green
+
+        if ($TVSource) {
+            Write-Host "  [*]" -ForegroundColor Cyan -NoNewline
+            Write-Host " Switching TV input to $TVSource..." -ForegroundColor White
+            $ok = Invoke-HAService "media_player" "select_source" $TVEntity @{ source = $TVSource }
+            if (-not $ok -and $TVHdmiUri) {
+                Write-Host "  [*]" -ForegroundColor Cyan -NoNewline
+                Write-Host " select_source failed, trying play_media..." -ForegroundColor White
+                $ok = Invoke-HAService "media_player" "play_media" $TVEntity @{
+                    media_content_type = "app"
+                    media_content_id   = $TVHdmiUri
+                }
+            }
+            if (-not $ok) {
+                Write-Host "  [!] " -ForegroundColor Yellow -NoNewline
+                Write-Host "HDMI switch failed — switch manually" -ForegroundColor Yellow
+            }
+        }
+        elseif ($TVHdmiUri) {
+            Write-Host "  [*]" -ForegroundColor Cyan -NoNewline
+            Write-Host " Switching TV input via play_media..." -ForegroundColor White
+            $ok = Invoke-HAService "media_player" "play_media" $TVEntity @{
+                media_content_type = "app"
+                media_content_id   = $TVHdmiUri
+            }
+            if (-not $ok) {
+                Write-Host "  [!] " -ForegroundColor Yellow -NoNewline
+                Write-Host "HDMI switch failed — switch manually" -ForegroundColor Yellow
+            }
+        }
+    }
+
     Write-Host "  [*]" -ForegroundColor Cyan -NoNewline
     Write-Host " Loading profile: " -ForegroundColor White -NoNewline
     Write-Host $ConsoleMode -ForegroundColor Green
@@ -61,6 +211,25 @@ function Set-DesktopMode {
         Start-Process "steam://close/bigpicture"
     }
 
+    if ($TVControl) {
+        if ($TVAutoHome) {
+            $remoteEntity = $TVEntity -replace '^media_player\.', 'remote.'
+            Write-Host "  [*]" -ForegroundColor Cyan -NoNewline
+            Write-Host " Switching TV to home screen..." -ForegroundColor White
+            $ok = Invoke-HAService "remote" "send_command" $remoteEntity @{ command = "HOME" }
+            if (-not $ok) {
+                Write-Host "  [!] " -ForegroundColor Yellow -NoNewline
+                Write-Host "send_command failed — skipping home screen" -ForegroundColor Yellow
+            }
+        }
+
+        if ($TVAutoOff) {
+            Write-Host "  [*]" -ForegroundColor Cyan -NoNewline
+            Write-Host " Turning off TV..." -ForegroundColor White
+            Invoke-HAService "media_player" "turn_off" $TVEntity
+        }
+    }
+
     Write-Host "  [*]" -ForegroundColor Cyan -NoNewline
     Write-Host " Loading profile: " -ForegroundColor White -NoNewline
     Write-Host "Desktop" -ForegroundColor Blue
@@ -72,6 +241,11 @@ function Set-DesktopMode {
 }
 
 # ──────────────────────────────────────────────
+if ($TVControl -and -not $HAToken) {
+    Write-Host "  [!]" -ForegroundColor Red -NoNewline
+    Write-Host " -TVControl requires -HAToken" -ForegroundColor Red
+    exit 1
+}
 Write-Host ""
 Write-Host "  ───  " -ForegroundColor DarkCyan -NoNewline
 Write-Host "Console Mode Switcher" -ForegroundColor Cyan -NoNewline
@@ -84,6 +258,20 @@ Write-Host "    Grace period: " -ForegroundColor DarkGray -NoNewline
 Write-Host "${GracePeriodSeconds}s" -ForegroundColor White
 Write-Host "    Win override: " -ForegroundColor DarkGray -NoNewline
 Write-Host "hold ${WinHoldSeconds}s" -ForegroundColor White
+
+$triggerMode = if ($AutoSwitch) { "Auto (on connect)" } else { "Guide button" }
+Write-Host "    Trigger: " -ForegroundColor DarkGray -NoNewline
+Write-Host $triggerMode -ForegroundColor White
+
+if ($TVControl) {
+    $tvInfo = "$TVEntity  |  Startup: ${TVStartupSeconds}s"
+    if ($TVSource) { $tvInfo += "  |  $TVSource" }
+    elseif ($TVHdmiUri) { $tvInfo += "  |  play_media" }
+    if ($TVAutoHome) { $tvInfo += "  |  home on exit" }
+    if ($TVAutoOff) { $tvInfo += "  |  off on exit" }
+    Write-Host "    TV Control: " -ForegroundColor DarkGray -NoNewline
+    Write-Host $tvInfo -ForegroundColor White
+}
 Write-Host ""
 
 # ─── State ────────────────────────────────────
@@ -93,13 +281,18 @@ $winHoldStartTime    = $null
 $winLastShown        = -1
     $manualOverride      = $false
     $overrideDirection   = $null    # "desktop" or "console"
+    $announcedController = $false
 
 if (Test-ControllerConnected) {
-    $lastMode = $true
-    Set-ConsoleMode
-}
-else {
-    Set-DesktopMode
+    if ($AutoSwitch) {
+        Set-ConsoleMode
+        $lastMode = $true
+    }
+    else {
+        Write-Host "  [+] " -ForegroundColor Green -NoNewline
+        Write-Host "Controller detected — press Guide button to enter Console Mode" -ForegroundColor Green
+        $announcedController = $true
+    }
 }
 
 # ─── Main Loop ────────────────────────────────
@@ -182,6 +375,25 @@ while ($true) {
             $manualOverride    = $false
             $overrideDirection = $null
         }
+
+        if ($overrideDirection -eq "desktop" -and $controllerConnected) {
+            for ($tick = 0; $tick -lt 10; $tick++) {
+                if (Test-GuideButtonPressed) {
+                    Write-Host "  [G]" -ForegroundColor Green -NoNewline
+                    Write-Host " Guide button detected — entering Console Mode" -ForegroundColor Green
+                    Set-ConsoleMode
+                    $lastMode            = $true
+                    $disconnectStartTime = $null
+                    $manualOverride      = $false
+                    $overrideDirection   = $null
+                    break
+                }
+                Start-Sleep -Milliseconds 50
+            }
+        }
+        else {
+            Start-Sleep -Milliseconds 500
+        }
     }
     else {
         if ($controllerConnected) {
@@ -189,16 +401,50 @@ while ($true) {
                 $wasGone = [math]::Round(((Get-Date) - $disconnectStartTime).TotalSeconds, 0)
                 Write-Host "  [+]" -ForegroundColor Green -NoNewline
                 Write-Host " Controller reconnected after " -ForegroundColor White -NoNewline
-                Write-Host "${wasGone}s" -ForegroundColor Green -NoNewline
-                Write-Host " — staying in Console Mode" -ForegroundColor White
+                Write-Host "${wasGone}s" -ForegroundColor Green
                 $disconnectStartTime = $null
+                $announcedController = $false
             }
+
+            if (-not $announcedController) {
+                if ($AutoSwitch) {
+                    Write-Host "  [+] " -ForegroundColor Green -NoNewline
+                    Write-Host "Controller detected — entering Console Mode" -ForegroundColor Green
+                }
+                else {
+                    Write-Host "  [+] " -ForegroundColor Green -NoNewline
+                    Write-Host "Controller detected — press Guide button to enter Console Mode" -ForegroundColor Green
+                }
+                $announcedController = $true
+            }
+
             if (-not $lastMode) {
-                Set-ConsoleMode
-                $lastMode = $true
+                if ($AutoSwitch) {
+                    Set-ConsoleMode
+                    $lastMode = $true
+                }
+                else {
+                    for ($tick = 0; $tick -lt 10; $tick++) {
+                        if (Test-GuideButtonPressed) {
+                            Write-Host "  [G]" -ForegroundColor Green -NoNewline
+                            Write-Host " Guide button detected — entering Console Mode" -ForegroundColor Green
+                            Set-ConsoleMode
+                            $lastMode = $true
+                            break
+                        }
+                        Start-Sleep -Milliseconds 50
+                    }
+                }
+            }
+            else {
+                Start-Sleep -Milliseconds 500
             }
         }
         else {
+            if ($announcedController) {
+                $announcedController = $false
+            }
+
             if ($lastMode) {
                 if ($null -eq $disconnectStartTime) {
                     $disconnectStartTime = Get-Date
@@ -213,13 +459,14 @@ while ($true) {
                         Write-Host "  [!]" -ForegroundColor Red -NoNewline
                         Write-Host " Grace period expired — switching to Desktop Mode" -ForegroundColor Red
                         Set-DesktopMode
-                        $lastMode      = $false
+                        $lastMode            = $false
                         $disconnectStartTime = $null
+                        $announcedController = $false
                     }
                 }
             }
+
+            Start-Sleep -Milliseconds 500
         }
     }
-
-    Start-Sleep -Milliseconds 500
 }
