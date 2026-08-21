@@ -36,6 +36,7 @@ The script polls controller presence every 500ms. By default it waits for the **
 | **Controller disconnected + grace period expires** | Switches TV to home screen (if `-TVAutoHome`), turns off TV (if `-TVAutoOff`), loads desktop profile |
 | **`-AutoSwitch` flag** | Switches to console mode immediately when the controller connects (old behavior) |
 | **Win key held for 2s** | Exit Console Mode — force-switch to Desktop |
+| **`-RequireSteam` flag** | Blocks Console Mode entry while Steam isn't running; once Big Picture has opened, switches to Desktop if Steam or Big Picture closes |
 
 > Guide button detection requires [DirectX End-User Runtime](#guide-button-support) (`xinput1_3.dll`).
 > If not installed, use `-AutoSwitch` instead.
@@ -59,6 +60,7 @@ The script polls controller presence every 500ms. By default it waits for the **
 
 | `GracePeriodSeconds` | `int` | `300` | Seconds to wait before switching to desktop after disconnect |
 | `WinHoldSeconds` | `int` | `2` | Seconds to hold Win key to exit Console Mode |
+| `RequireSteam` | `switch` | `✗` | Require Steam to be running to enter Console Mode; auto-exit to Desktop if Steam or Big Picture closes |
 
 ### Guide Button
 
