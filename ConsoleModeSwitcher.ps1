@@ -267,7 +267,7 @@ Write-Host "    Console Mode Profile:      " -ForegroundColor DarkGray -NoNewlin
 Write-Host $ConsoleMode -ForegroundColor White
 Write-Host "    Grace period: " -ForegroundColor DarkGray -NoNewline
 Write-Host "${GracePeriodSeconds}s" -ForegroundColor White
-Write-Host "    Win override: " -ForegroundColor DarkGray -NoNewline
+    Write-Host "    Win override (exit): " -ForegroundColor DarkGray -NoNewline
 Write-Host "hold ${WinHoldSeconds}s" -ForegroundColor White
 
 $triggerMode = if ($AutoSwitch) { "Auto (on connect)" } else { "Guide button" }
@@ -291,7 +291,7 @@ $disconnectStartTime = $null
 $winHoldStartTime    = $null
 $winLastShown        = -1
 $manualOverride      = $false
-$overrideDirection   = $null    # "desktop" or "console"
+$overrideDirection   = $null    # "desktop"
 $announcedController = $false
 
 if (Test-ControllerConnected) {
@@ -312,15 +312,14 @@ try {
 
         $winHeld = Test-WinHeld
 
-        # ── Win hold tracking ──
-        if ($winHeld) {
+        # ── Win hold tracking (exit Console Mode only) ──
+        if ($winHeld -and $lastMode) {
             if ($null -eq $winHoldStartTime) {
                 $winHoldStartTime = Get-Date
-                $targetMode = if ($lastMode) { "Desktop" } else { "Console" }
                 Write-Host "  [WIN]" -ForegroundColor Yellow -NoNewline
                 Write-Host " Hold for " -ForegroundColor DarkYellow -NoNewline
                 Write-Host "${WinHoldSeconds}s" -ForegroundColor Yellow -NoNewline
-                Write-Host " to force $targetMode Mode" -ForegroundColor DarkYellow
+                Write-Host " to exit Console Mode" -ForegroundColor DarkYellow
             }
             else {
                 $winElapsed    = ((Get-Date) - $winHoldStartTime).TotalSeconds
@@ -347,26 +346,15 @@ try {
             }
         }
 
-        # ── Win override trigger ──
-        if ($null -ne $winHoldStartTime -and ((Get-Date) - $winHoldStartTime).TotalSeconds -ge $WinHoldSeconds) {
-            if ($lastMode) {
-                Write-Host "  [WIN]" -ForegroundColor Red -NoNewline
-                Write-Host " Override triggered — forcing Desktop Mode" -ForegroundColor Red
-                Set-DesktopMode
-                $lastMode            = $false
-                $disconnectStartTime = $null
-                $manualOverride      = $true
-                $overrideDirection   = "desktop"
-            }
-            else {
-                Write-Host "  [WIN]" -ForegroundColor Green -NoNewline
-                Write-Host " Override triggered — forcing Console Mode" -ForegroundColor Green
-                Set-ConsoleMode
-                $lastMode            = $true
-                $disconnectStartTime = $null
-                $manualOverride      = $true
-                $overrideDirection   = "console"
-            }
+        # ── Win override trigger (exit Console Mode only) ──
+        if ($lastMode -and $null -ne $winHoldStartTime -and ((Get-Date) - $winHoldStartTime).TotalSeconds -ge $WinHoldSeconds) {
+            Write-Host "  [WIN]" -ForegroundColor Red -NoNewline
+            Write-Host " Override triggered — exiting Console Mode" -ForegroundColor Red
+            Set-DesktopMode
+            $lastMode            = $false
+            $disconnectStartTime = $null
+            $manualOverride      = $true
+            $overrideDirection   = "desktop"
             $winHoldStartTime = $null
             $winLastShown     = -1
         }
@@ -381,13 +369,6 @@ try {
                 $manualOverride    = $false
                 $overrideDirection = $null
             }
-            elseif ($overrideDirection -eq "console" -and $controllerConnected) {
-                Write-Host "  [o]" -ForegroundColor DarkGray -NoNewline
-                Write-Host " Manual override cleared — controller present, resuming normal operation" -ForegroundColor DarkGray
-                $manualOverride    = $false
-                $overrideDirection = $null
-            }
-
             if ($overrideDirection -eq "desktop" -and $controllerConnected) {
                 for ($tick = 0; $tick -lt 10; $tick++) {
                     if (Test-GuideButtonPressed) {
