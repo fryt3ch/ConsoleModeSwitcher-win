@@ -35,7 +35,8 @@ The script polls controller presence every 500ms. By default it waits for the **
 | **Guide button pressed** | Turns on TV (if `-TVControl`), switches HDMI, loads console profile, launches Steam BPM |
 | **Controller disconnected + grace period expires** | Switches TV to home screen (if `-TVAutoHome`), turns off TV (if `-TVAutoOff`), loads desktop profile |
 | **`-AutoSwitch` flag** | Switches to console mode immediately when the controller connects (old behavior) |
-| **Win key held for 2s** | Manual override — force-switch to the opposite mode |
+| **Win key held for 2s** | Exit Console Mode — force-switch to Desktop |
+| **`-RequireSteam` flag** | Blocks Console Mode entry while Steam isn't running; once Big Picture has opened, switches to Desktop if Steam or Big Picture closes |
 
 > Guide button detection requires [DirectX End-User Runtime](#guide-button-support) (`xinput1_3.dll`).
 > If not installed, use `-AutoSwitch` instead.
@@ -58,7 +59,8 @@ The script polls controller presence every 500ms. By default it waits for the **
 | `Tool` | `string` | `.\MonitorProfileSwitcher\MonitorSwitcher.exe` | Path to `MonitorSwitcher.exe` |
 
 | `GracePeriodSeconds` | `int` | `300` | Seconds to wait before switching to desktop after disconnect |
-| `WinHoldSeconds` | `int` | `2` | Seconds to hold Win key for manual override |
+| `WinHoldSeconds` | `int` | `2` | Seconds to hold Win key to exit Console Mode |
+| `RequireSteam` | `switch` | `✗` | Require Steam to be running to enter Console Mode; auto-exit to Desktop if Steam or Big Picture closes |
 
 ### Guide Button
 

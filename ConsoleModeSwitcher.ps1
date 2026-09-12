@@ -7,6 +7,7 @@ param(
     [int]$GracePeriodSeconds = 300,
     [int]$WinHoldSeconds = 2,
     [switch]$AutoSwitch,
+    [switch]$RequireSteam,
     [switch]$TVControl,
     [string]$HAServer  = "http://homeassistant.local:8123",
     [string]$HAToken,
@@ -115,6 +116,10 @@ function Test-SteamBigPicture {
     return $false
 }
 
+function Test-SteamRunning {
+    return $null -ne (Get-Process -Name "steam" -ErrorAction SilentlyContinue)
+}
+
 function Test-GuideButtonPressed {
     for ($i = 0; $i -lt 4; $i++) {
         $state = New-Object XINPUT_STATE
@@ -157,6 +162,14 @@ function Invoke-HAService($domain, $service, $entity, $extraData) {
 }
 
 function Set-ConsoleMode {
+    $script:bigPictureSeen = $false
+
+    if ($RequireSteam -and -not (Test-SteamRunning)) {
+        Write-Host "  [!] " -ForegroundColor Yellow -NoNewline
+        Write-Host "Steam is not running — Console Mode blocked (-RequireSteam)" -ForegroundColor Yellow
+        return $false
+    }
+
     if ($TVControl) {
         Write-Host "  [*]" -ForegroundColor Cyan -NoNewline
         Write-Host " Turning on TV..." -ForegroundColor White
@@ -213,6 +226,7 @@ function Set-ConsoleMode {
     Start-Process "steam://open/bigpicture"
     Write-Host "  [+] " -ForegroundColor Green -NoNewline
     Write-Host "Console Mode enabled" -ForegroundColor Green
+    return $true
 }
 
 function Set-DesktopMode {
@@ -267,12 +281,17 @@ Write-Host "    Console Mode Profile:      " -ForegroundColor DarkGray -NoNewlin
 Write-Host $ConsoleMode -ForegroundColor White
 Write-Host "    Grace period: " -ForegroundColor DarkGray -NoNewline
 Write-Host "${GracePeriodSeconds}s" -ForegroundColor White
-Write-Host "    Win override: " -ForegroundColor DarkGray -NoNewline
+    Write-Host "    Win override (exit): " -ForegroundColor DarkGray -NoNewline
 Write-Host "hold ${WinHoldSeconds}s" -ForegroundColor White
 
 $triggerMode = if ($AutoSwitch) { "Auto (on connect)" } else { "Guide button" }
 Write-Host "    Trigger: " -ForegroundColor DarkGray -NoNewline
 Write-Host $triggerMode -ForegroundColor White
+
+if ($RequireSteam) {
+    Write-Host "    Require Steam: " -ForegroundColor DarkGray -NoNewline
+    Write-Host "yes" -ForegroundColor White
+}
 
 if ($TVControl) {
     $tvInfo = "$TVEntity  |  Startup: ${TVStartupSeconds}s"
@@ -291,13 +310,15 @@ $disconnectStartTime = $null
 $winHoldStartTime    = $null
 $winLastShown        = -1
 $manualOverride      = $false
-$overrideDirection   = $null    # "desktop" or "console"
+$overrideDirection   = $null    # "desktop"
 $announcedController = $false
+$bigPictureSeen      = $false
 
 if (Test-ControllerConnected) {
     if ($AutoSwitch) {
-        Set-ConsoleMode
-        $lastMode = $true
+        if (Set-ConsoleMode) {
+            $lastMode = $true
+        }
     }
     else {
         Write-Host "  [+] " -ForegroundColor Green -NoNewline
@@ -312,15 +333,14 @@ try {
 
         $winHeld = Test-WinHeld
 
-        # ── Win hold tracking ──
-        if ($winHeld) {
+        # ── Win hold tracking (exit Console Mode only) ──
+        if ($winHeld -and $lastMode) {
             if ($null -eq $winHoldStartTime) {
                 $winHoldStartTime = Get-Date
-                $targetMode = if ($lastMode) { "Desktop" } else { "Console" }
                 Write-Host "  [WIN]" -ForegroundColor Yellow -NoNewline
                 Write-Host " Hold for " -ForegroundColor DarkYellow -NoNewline
                 Write-Host "${WinHoldSeconds}s" -ForegroundColor Yellow -NoNewline
-                Write-Host " to force $targetMode Mode" -ForegroundColor DarkYellow
+                Write-Host " to exit Console Mode" -ForegroundColor DarkYellow
             }
             else {
                 $winElapsed    = ((Get-Date) - $winHoldStartTime).TotalSeconds
@@ -347,28 +367,35 @@ try {
             }
         }
 
-        # ── Win override trigger ──
-        if ($null -ne $winHoldStartTime -and ((Get-Date) - $winHoldStartTime).TotalSeconds -ge $WinHoldSeconds) {
-            if ($lastMode) {
-                Write-Host "  [WIN]" -ForegroundColor Red -NoNewline
-                Write-Host " Override triggered — forcing Desktop Mode" -ForegroundColor Red
+        # ── Win override trigger (exit Console Mode only) ──
+        if ($lastMode -and $null -ne $winHoldStartTime -and ((Get-Date) - $winHoldStartTime).TotalSeconds -ge $WinHoldSeconds) {
+            Write-Host "  [WIN]" -ForegroundColor Red -NoNewline
+            Write-Host " Override triggered — exiting Console Mode" -ForegroundColor Red
+            Set-DesktopMode
+            $lastMode            = $false
+            $disconnectStartTime = $null
+            $manualOverride      = $true
+            $overrideDirection   = "desktop"
+            $winHoldStartTime = $null
+            $winLastShown     = -1
+        }
+
+        # ── RequireSteam exit monitor ──
+        if ($RequireSteam -and $lastMode) {
+            if (Test-SteamBigPicture) {
+                $bigPictureSeen = $true
+            }
+
+            if ($bigPictureSeen -and (-not (Test-SteamRunning) -or -not (Test-SteamBigPicture))) {
+                Write-Host "  [!]" -ForegroundColor Red -NoNewline
+                Write-Host " Steam / Big Picture closed — switching to Desktop Mode" -ForegroundColor Red
                 Set-DesktopMode
                 $lastMode            = $false
                 $disconnectStartTime = $null
-                $manualOverride      = $true
-                $overrideDirection   = "desktop"
+                $manualOverride      = $false
+                $overrideDirection   = $null
+                $bigPictureSeen      = $false
             }
-            else {
-                Write-Host "  [WIN]" -ForegroundColor Green -NoNewline
-                Write-Host " Override triggered — forcing Console Mode" -ForegroundColor Green
-                Set-ConsoleMode
-                $lastMode            = $true
-                $disconnectStartTime = $null
-                $manualOverride      = $true
-                $overrideDirection   = "console"
-            }
-            $winHoldStartTime = $null
-            $winLastShown     = -1
         }
 
         # ── Controller check ──
@@ -381,23 +408,17 @@ try {
                 $manualOverride    = $false
                 $overrideDirection = $null
             }
-            elseif ($overrideDirection -eq "console" -and $controllerConnected) {
-                Write-Host "  [o]" -ForegroundColor DarkGray -NoNewline
-                Write-Host " Manual override cleared — controller present, resuming normal operation" -ForegroundColor DarkGray
-                $manualOverride    = $false
-                $overrideDirection = $null
-            }
-
             if ($overrideDirection -eq "desktop" -and $controllerConnected) {
                 for ($tick = 0; $tick -lt 10; $tick++) {
                     if (Test-GuideButtonPressed) {
                         Write-Host "  [G]" -ForegroundColor Green -NoNewline
                         Write-Host " Guide button detected — entering Console Mode" -ForegroundColor Green
-                        Set-ConsoleMode
-                        $lastMode            = $true
-                        $disconnectStartTime = $null
-                        $manualOverride      = $false
-                        $overrideDirection   = $null
+                        if (Set-ConsoleMode) {
+                            $lastMode            = $true
+                            $disconnectStartTime = $null
+                            $manualOverride      = $false
+                            $overrideDirection   = $null
+                        }
                         break
                     }
                     Start-Sleep -Milliseconds 50
@@ -432,16 +453,18 @@ try {
 
                 if (-not $lastMode) {
                     if ($AutoSwitch) {
-                        Set-ConsoleMode
-                        $lastMode = $true
+                        if (Set-ConsoleMode) {
+                            $lastMode = $true
+                        }
                     }
                     else {
                         for ($tick = 0; $tick -lt 10; $tick++) {
                             if (Test-GuideButtonPressed) {
                                 Write-Host "  [G]" -ForegroundColor Green -NoNewline
                                 Write-Host " Guide button detected — entering Console Mode" -ForegroundColor Green
-                                Set-ConsoleMode
-                                $lastMode = $true
+                                if (Set-ConsoleMode) {
+                                    $lastMode = $true
+                                }
                                 break
                             }
                             Start-Sleep -Milliseconds 50
